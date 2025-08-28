@@ -1,0 +1,37 @@
+{
+  "name": "bot_nft",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "start:dry": "DRY_RUN=true node src/index.js",
+    "compile": "npx hardhat compile",
+    "deploy:sepolia": "npx hardhat run scripts/deploy.cjs --network sepolia",
+    "deploy:localhost": "npx hardhat run scripts/deploy.cjs --network localhost",
+    "node": "npx hardhat node"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Alvarofr09/BOT_NFT.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Alvarofr09/BOT_NFT/issues"
+  },
+  "homepage": "https://github.com/Alvarofr09/BOT_NFT#readme",
+  "dependencies": {
+    "axios": "^1.11.0",
+    "ethers": "^6.15.0",
+    "p-queue": "^8.1.0",
+    "p-retry": "^7.0.0"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^6.1.0",
+    "dotenv": "^17.2.1",
+    "hardhat": "^3.0.3"
+  }
+}
