@@ -35,12 +35,28 @@ export const loot = buildClient(process.env.LIQUIDLOOT_BASE, process.env.LIQUIDL
  * Ajusta estas funciones al JSON Real que devuelven las APIs de Driptrade / Lquidloot
  * Ejemplo placeholders:
  */
-export async function getDripStats(collectionId) {
+/*export async function getDripStats(collectionId) {
 	// Ej: GET /collections/{id}/stats -> { floorPrice: "0.5", highestBid: "0.45" }
 	return drip.call({
 		method: "GET",
 		url: `/collection/${collectionId}/stats`
 	});
+}*/
+
+export async function getDripStats(collectionId) {
+  const res = await drip.call({
+    method: "GET",
+    url: "/collections/v5",
+    params: { id: collectionId } // collectionId = dirección del contrato
+  });
+
+  console.log("Response", res)
+
+  const collection = res?.collections?.[0] ?? {};
+  return {
+    floorPrice: collection?.floorAsk?.price?.amount?.decimal ?? null,
+    highestBid: collection?.topBid?.price?.amount?.decimal ?? null
+  };
 }
 
 export async function getLootMyListings(collectionId) {
@@ -58,7 +74,7 @@ export async function patchLootListingPrice(listingId, newPrice) {
 	// Ej: PATCH /listings/{id} body { price: "0.59" }
 	return localStorage.call({
 		method: "PATCH",
-		url: `/listings/&{listingId}`,
+		url: `/listings/${listingId}`,
 		data: {
 			price: String(newPrice)
 		}
