@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NFT Price Sync Bot (Drip.Trade -> LiquidLoot) A
+NFT Price Sync Bot (Drip.Trade -> LiquidLoot)
 
 Objetivo:
 - Leer floor price y top bid de colecciones en Drip.Trade
@@ -51,10 +51,8 @@ class Config:
     margin_pct: float
     strategy: str  # 'undercut_floor' o 'above_top_bid'
     dry_run: bool
-    # Drip.Trade
     drip_base_url: str
     drip_api_key: Optional[str]
-    # LiquidLoot
     ll_base_url: str
     ll_api_key: Optional[str]
     ll_wallet_address: Optional[str]
@@ -66,20 +64,18 @@ def load_config() -> Config:
 
     interval_sec = int(os.getenv("INTERVAL_SEC", "30"))
     margin_pct = float(os.getenv("MARGIN_PCT", "0.02"))
-    strategy = os.getenv("STRATEGY", "undercut_floor")  # o 'above_top_bid'
+    strategy = os.getenv("STRATEGY", "undercut_floor")
     dry_run = os.getenv("DRY_RUN", "true").lower() in ("1", "true", "yes")
 
     drip_base_url = os.getenv("DRIP_BASE_URL", "").rstrip("/")
-    drip_api_key = os.getenv("DRIP_API_KEY")  # opcional
+    drip_api_key = os.getenv("DRIP_API_KEY")
 
     ll_base_url = os.getenv("LL_BASE_URL", "").rstrip("/")
     ll_api_key = os.getenv("LL_API_KEY")
     ll_wallet_address = os.getenv("LL_WALLET_ADDRESS")
 
-    if not drip_base_url:
-        raise SystemExit("Debes configurar DRIP_BASE_URL (endpoint público para stats por colección).")
-    if not ll_base_url:
-        raise SystemExit("Debes configurar LL_BASE_URL (endpoint REST para listar/actualizar listados en LiquidLoot).")
+    if not drip_base_url or not ll_base_url:
+        raise SystemExit("Debes configurar DRIP_BASE_URL y LL_BASE_URL en el .env")
 
     return Config(
         collections=collections,
@@ -111,15 +107,9 @@ def http_request(method: str, url: str, *, headers: Dict[str, str] = None, param
             logger.warning(f"HTTP fallo ({e}); reintentando en {sleep_s:.1f}s ({attempt}/{retries})...")
             time.sleep(sleep_s)
 
-# ---------- Clientes de API (ajusta endpoints según docs de cada sitio) ----------
+# ---------- Clientes de API ----------
 
 class DripClient:
-    """
-    Cliente para Drip.Trade
-    Endpoint esperado (ejemplo): GET {DRIP_BASE_URL}/collections/{slug}/stats
-    Debe devolver algo con 'floor' y 'topBid' en la misma divisa (p.ej. HYPE).
-    """
-
     def __init__(self, base_url: str, api_key: Optional[str] = None):
         self.base_url = base_url
         self.api_key = api_key
@@ -137,20 +127,16 @@ class DripClient:
             raise RuntimeError(f"Drip API {url} devolvió {resp.status_code}: {resp.text}")
         data = resp.json()["collections"]
 
-        # buscar la colección por slug
         collection = next((c for c in data if c["slug"] == slug), None)
         if not collection:
             raise ValueError(f"No se encontró la colección '{slug}' en Drip API")
 
-        # función para convertir el $bigint
         def parse_bigint(val: str) -> float:
             return int(val.replace("$bigint", "")) / 1e18
 
         floor = parse_bigint(collection["floorPrice"])
         top_bid = parse_bigint(collection["topBid"])
         return floor, top_bid
-
-
 
 class LiquidLootClient:
     def __init__(self, base_url: str, api_key: Optional[str] = None, wallet: Optional[str] = None):
@@ -161,47 +147,58 @@ class LiquidLootClient:
     def _headers(self) -> Dict[str, str]:
         return {"Accept": "application/json"}
 
-    def get_floor_price(self, slug: str) -> Optional[float]:
+    def get_my_listings(self, slug: str) -> List[Dict[str, Any]]:
         url = f"{self.base_url}/listings"
-        resp = http_request("GET", url, headers=self._headers(), timeout=10)
-        if resp.status_code != 200:
-            raise RuntimeError(f"LiquidLoot API {url} devolvió {resp.status_code}: {resp.text}")
-        data = resp.json()
+        params = {}
+        if self.wallet:
+            params["offerer_address"] = self.wallet
 
+        resp = http_request("GET", url, headers=self._headers(), params=params, timeout=10)
+        data = resp.json()
         listings = data.get("data", {}).get("listings", [])
+
+        if listings:
+            return listings
+
+        all_listings = data.get("data", {}).get("listings", [])
+        if not all_listings:
+            return []
+        example = all_listings[0]
+        print(f"⚠️ No hay listings en tu wallet. Usando ejemplo: {example['id']}")
+        return [example]
+
+    def get_floor_and_topbid(self, slug: str) -> Tuple[Optional[float], Optional[float]]:
+        listings = self.get_my_listings(slug)
         if not listings:
-            return None
+            return None, None
 
         prices = []
         for l in listings:
             for item in l.get("listing_consideration_items", []):
-                if item.get("token_address") == "0x2fe0f0404431023d0ea86259e3fb6fadd8d78102de6e2f5aaac47be519184e1b":
+                if item.get("token_address") == "0x0000000000000000000000000000000000000000":
                     price_wei = int(item["end_amount"])
-                    price = price_wei / 1e18
-                    prices.append(price)
+                    prices.append(price_wei / 1e18)
 
-        return min(prices) if prices else None
+        if not prices:
+            return None, None
 
+        floor = min(prices)
+        top_bid = max(prices)
+        return floor, top_bid
 
 # ---------- Lógica de precios ----------
 
 def compute_target_price(floor: float, top_bid: float, current_price: float, margin_pct: float, strategy: str) -> float:
-    """
-    Devuelve el precio objetivo para el listado en LiquidLoot.
-    - 'undercut_floor': listar a (floor * (1 - margin)), pero nunca por debajo de (top_bid * (1 + 0.001)) para no vender por debajo del mejor bid + 0.1%
-    - 'above_top_bid': listar a (top_bid * (1 + margin)); si eso queda por encima del floor actual de Drip, no pasa nada (es una estrategia conservadora).
-    """
     if strategy == "above_top_bid":
         target = top_bid * (1.0 + margin_pct)
     else:
         target = floor * (1.0 - margin_pct)
-        min_guard = top_bid * 1.001  # 0.1% por encima del top bid
+        min_guard = top_bid * 1.001
         if target < min_guard:
             target = min_guard
-    # Evita cambios minúsculos (<0.1%) para reducir churn
     if abs(target - current_price) / max(current_price, 1e-9) < 0.001:
         return current_price
-    return round(target, 6)  # 6 decimales por seguridad
+    return round(target, 6)
 
 # ---------- Bot principal ----------
 
@@ -213,14 +210,19 @@ class PriceSyncBot:
 
     def sync_collection(self, slug: str):
         drip_floor, drip_top_bid = self.drip.get_collection_stats(slug)
-        loot_floor = self.ll.get_floor_price(slug)
-
         logger.info(f"[{slug}] DripTrade -> floor={drip_floor:.4f}, topBid={drip_top_bid:.4f}")
-        logger.info(f"[{slug}] LiquidLoot -> floor={loot_floor:.4f}" if loot_floor else f"[{slug}] LiquidLoot -> sin datos")
 
-        # Si solo quieres comparar, paramos aquí 👇
-        return
+        loot_floor, loot_top_bid = self.ll.get_floor_and_topbid(slug)
+        if loot_floor is None:
+            logger.info(f"[{slug}] LiquidLoot -> sin datos (no hay listings activos)")
+        else:
+            logger.info(f"[{slug}] LiquidLoot -> floor={loot_floor:.4f}, topBid={loot_top_bid:.4f}")
+            diff_floor = loot_floor - drip_floor
+            diff_topbid = loot_top_bid - drip_top_bid
+            logger.info(f"[{slug}] Diferencia floor: {diff_floor:.4f}, Diferencia topBid: {diff_topbid:.4f}")
 
+        if self.cfg.dry_run:
+            logger.info(f"[{slug}] Dry-run: no se actualizan listings")
 
     def run_forever(self):
         logger.info("Iniciando PriceSyncBot... (Ctrl+C para salir)")
@@ -239,9 +241,10 @@ class PriceSyncBot:
                 logger.info("Interrumpido por el usuario. Saliendo.")
                 break
             except Exception:
-                # Catch-all para evitar caídas del bot
                 logger.error(f"Excepción no controlada en el loop principal:\n{traceback.format_exc()}")
                 time.sleep(self.cfg.interval_sec)
+
+# ---------- Entry point ----------
 
 if __name__ == "__main__":
     cfg = load_config()
